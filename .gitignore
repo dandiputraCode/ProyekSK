@@ -1,0 +1,35 @@
+
+# Python environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+
+# Local databases and attendance records
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.log
+
+# Student biometric data
+/database_wajah/
+/uploads/
+/captures/
+
+# AI model files
+/models/*.pt
+/models/*.onnx
+/models/*.engine
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

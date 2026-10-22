@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pendaftaran Siswa | AIoT Smart Attendance</title>
+  <meta name="theme-color" content="#101a35">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='registration.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span>AS</span></div>
+        <div><strong>AIoT<span> Attendance</span></strong><small>SMART CLASSROOM SYSTEM</small></div>
+      </div>
+      <div class="nav-label">MENU UTAMA</div>
+      <a class="nav-item" href="/"><span class="nav-icon">▦</span> Dashboard</a>
+      <a class="nav-item active" href="/students/register"><span class="nav-icon">＋</span> Pendaftaran Siswa</a>
+      <a class="nav-item" href="/#attendance-section"><span class="nav-icon">▤</span> Data Absensi</a>
+      <a class="nav-item" href="/#system-section"><span class="nav-icon">⌘</span> Status Sistem</a>
+      <div class="sidebar-bottom">
+        <div class="device-card">
+          <div class="device-heading"><span class="status-dot"></span><strong>Prototype Mode</strong></div>
+          <p>Foto akan disimpan di laptop ini. Pastikan Anda memiliki izin untuk mendaftarkan data wajah siswa.</p>
+          <span class="device-tag">LOCAL ENROLLMENT</span>
+        </div>
+        <div class="profile">
+          <div class="avatar">AD</div>
+          <div><strong>Administrator</strong><small>Smart Classroom</small></div>
+          <span class="profile-dots">•••</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <div class="eyebrow">STUDENT MANAGEMENT / ENROLLMENT</div>
+          <h1>Pendaftaran Siswa</h1>
+          <p class="subtitle">Daftarkan identitas dan foto referensi langsung melalui kamera.</p>
+        </div>
+        <div class="topbar-actions">
+          <a class="button button-secondary" href="/">← Kembali ke Dashboard</a>
+        </div>
+      </header>
+
+      <section class="enroll-banner">
+        <div>
+          <div class="banner-kicker"><span class="live-dot"></span> FACE DATABASE</div>
+          <h2>Daftarkan siswa dari kamera</h2>
+          <p>Masukkan NPM dan nama siswa, ambil tiga foto dengan jelas, lalu simpan. YOLO akan memeriksa agar setiap foto berisi tepat satu wajah.</p>
+        </div>
+        <div class="enroll-banner-icon" aria-hidden="true">FACE<br><span>REGISTER</span></div>
+      </section>
+
+      <div class="enroll-grid">
+        <section class="content-card enroll-form-card">
+          <div class="section-heading">
+            <div><div class="eyebrow">STEP 01</div><h2>Identitas Siswa</h2><p>NPM harus unik dan belum terdaftar.</p></div>
+          </div>
+          <form id="registration-form">
+            <label class="form-field" for="student-npm">
+              <span>NPM / ID Siswa</span>
+              <input id="student-npm" name="npm" type="text" maxlength="40" autocomplete="off" placeholder="Contoh: 27126030" required>
+              <small>Gunakan identitas yang konsisten dengan sistem akademik.</small>
+            </label>
+            <label class="form-field" for="student-name">
+              <span>Nama Lengkap</span>
+              <input id="student-name" name="nama" type="text" maxlength="150" autocomplete="name" placeholder="Masukkan nama lengkap siswa" required>
+            </label>
+            <div class="privacy-note">
+              <strong>Privasi data biometrik</strong>
+              <p>Gunakan fitur ini hanya setelah memperoleh izin siswa/wali sesuai kebijakan yang berlaku. Foto disimpan di folder database wajah lokal.</p>
+            </div>
+            <label class="consent-row" for="student-consent">
+              <input id="student-consent" type="checkbox" required>
+              <span>Saya berwenang mendaftarkan siswa ini dan telah memperoleh persetujuan yang diperlukan untuk mengambil serta menyimpan foto wajahnya.</span>
+            </label>
+          </form>
+        </section>
+
+        <section class="content-card camera-card">
+          <div class="section-heading">
+            <div><div class="eyebrow">STEP 02</div><h2>Ambil Foto Wajah</h2><p>Ambil tepat 3 foto referensi.</p></div>
+            <span class="photo-counter" id="photo-counter">0 / 3</span>
+          </div>
+          <div class="camera-frame">
+            <video id="camera-video" autoplay playsinline muted></video>
+            <div id="camera-placeholder" class="camera-placeholder">
+              <div class="camera-placeholder-icon">◎</div>
+              <strong>Kamera belum diaktifkan</strong>
+              <span>Aktifkan kamera untuk mulai mengambil foto.</span>
+            </div>
+            <div class="camera-overlay"><span class="camera-live-dot"></span><span id="camera-status">KAMERA NONAKTIF</span></div>
+          </div>
+          <canvas id="capture-canvas" width="640" height="480" hidden></canvas>
+          <div class="camera-controls">
+            <button type="button" class="button button-secondary" id="start-camera">◎ Aktifkan Kamera</button>
+            <button type="button" class="button button-primary" id="capture-photo" disabled>＋ Ambil Foto</button>
+          </div>
+          <p class="capture-tip">Tip: ambil foto pertama menghadap kamera, foto kedua sedikit menoleh ke kiri, dan foto ketiga sedikit menoleh ke kanan. Pastikan wajah cukup terang.</p>
+          <div class="photo-grid" id="photo-grid" aria-live="polite">
+            <div class="photo-slot empty"><span>01</span><small>Foto pertama</small></div>
+            <div class="photo-slot empty"><span>02</span><small>Foto kedua</small></div>
+            <div class="photo-slot empty"><span>03</span><small>Foto ketiga</small></div>
+          </div>
+          <div class="camera-controls lower-controls">
+            <button type="button" class="button button-secondary" id="retake-photos" disabled>Hapus Semua Foto</button>
+            <button type="submit" form="registration-form" class="button button-primary" id="save-student" disabled>Simpan Siswa</button>
+          </div>
+          <div id="registration-message" class="registration-message" role="status" aria-live="polite" hidden></div>
+        </section>
+      </div>
+
+      <footer class="footer"><span>© 2026 AIoT Smart Attendance</span><span>Student Enrollment · Local Prototype</span></footer>
+    </main>
+  </div>
+  <script src="{{ url_for('static', filename='enroll.js') }}"></script>
+</body>
+</html>
