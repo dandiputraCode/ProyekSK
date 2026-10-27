@@ -39,6 +39,7 @@ python test_face_recognition.py
 * **[`docs/CARA_KERJA_YOLO_DAN_FACE_RECOGNITION.md`](docs/CARA_KERJA_YOLO_DAN_FACE_RECOGNITION.md)** — Alur matematis Bounding Box YOLO dan pencocokan wajah InsightFace.
 * **[`docs/PENJELASAN_6_LIBRARY_AI_VISION.md`](docs/PENJELASAN_6_LIBRARY_AI_VISION.md)** — Penjelasan mendalam 6 library AI/Vision, konsep **ArcFace**, analogi, ilustrasi, dan potongan kode asli.
 * **[`docs/CARA_KERJA_WEBSITE_SQLITE_DAN_ESP32.md`](docs/CARA_KERJA_WEBSITE_SQLITE_DAN_ESP32.md)** — Penjelasan mendalam Web Server Flask, Database SQLite, HTTP Requests, dan IoT ESP32.
+* **[`docs/CARA_KERJA_SENSOR_R503_DAN_FIRMWARE_ESP32.md`](docs/CARA_KERJA_SENSOR_R503_DAN_FIRMWARE_ESP32.md)** — Prinsip kapasitif sensor R503, wiring, protokol serial, dan bedah kode `esp32R503-Serial.ino`.
 
 ## Library & Dependensi yang Digunakan
 
