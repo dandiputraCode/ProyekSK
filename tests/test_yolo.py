@@ -1,9 +1,11 @@
 
+from pathlib import Path
 import cv2
 from ultralytics import YOLO
 
-# Memuat model YOLO khusus deteksi wajah
-model = YOLO("models/yolo26n-face.pt")
+# ponytail: path relatif ke root proyek agar aman dijalankan dari mana saja
+MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "yolo26n-face.pt"
+model = YOLO(str(MODEL_PATH))
 
 # Membuka kamera bawaan laptop
 kamera = cv2.VideoCapture(0)

@@ -18,6 +18,7 @@
       <div class="nav-label">MENU UTAMA</div>
       <a class="nav-item" href="/"><span class="nav-icon">▦</span> Dashboard</a>
       <a class="nav-item active" href="/students/register"><span class="nav-icon">＋</span> Pendaftaran Siswa</a>
+      <a class="nav-item" href="/#students-section"><span class="nav-icon">♙</span> Siswa Terdaftar</a>
       <a class="nav-item" href="/#attendance-section"><span class="nav-icon">▤</span> Data Absensi</a>
       <a class="nav-item" href="/#system-section"><span class="nav-icon">⌘</span> Status Sistem</a>
       <div class="sidebar-bottom">
@@ -78,6 +79,17 @@
               <input id="student-consent" type="checkbox" required>
               <span>Saya berwenang mendaftarkan siswa ini dan telah memperoleh persetujuan yang diperlukan untuk mengambil serta menyimpan foto wajahnya.</span>
             </label>
+            <div class="privacy-note" style="margin-top:12px">
+              <strong>Sensor Sidik Jari R503 (USB Serial)</strong>
+              <p id="fingerprint-sensor-status">Memeriksa koneksi ESP32/R503...</p>
+              <label class="consent-row" for="enroll-finger" style="margin-top:8px">
+                <input id="enroll-finger" type="checkbox">
+                <span>Rekam sidik jari R503 sekaligus saat klik Simpan Siswa (opsional saat daftar, wajib sebelum absensi 2 faktor).</span>
+              </label>
+              <div class="camera-controls" style="margin-top:10px">
+                <button type="button" class="button button-secondary" id="enroll-finger-only">☝ Rekam Sidik Jari Saja (Susulan)</button>
+              </div>
+            </div>
           </form>
         </section>
 
@@ -113,6 +125,18 @@
           <div id="registration-message" class="registration-message" role="status" aria-live="polite" hidden></div>
         </section>
       </div>
+
+      <section class="content-card" id="enrolled-list-section" style="margin-top:20px">
+        <div class="section-heading">
+          <div><div class="eyebrow">REGISTERED STUDENTS</div><h2>Siswa yang Baru Didaftarkan</h2><p>Klik baris atau isi NPM di atas jika ingin merekam sidik jari susulan.</p></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>SISWA</th><th>NPM</th><th>FOTO WAJAH</th><th>SIDIK JARI R503</th><th>TERDAFTAR</th></tr></thead>
+            <tbody id="enrolled-students-body"><tr><td colspan="5" class="loading-cell">Memuat daftar siswa...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
 
       <footer class="footer"><span>© 2026 AIoT Smart Attendance</span><span>Student Enrollment · Local Prototype</span></footer>
     </main>

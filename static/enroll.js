@@ -12,6 +12,70 @@ const cameraPlaceholder = document.getElementById('camera-placeholder');
 const cameraStatus = document.getElementById('camera-status');
 const cameraLiveDot = document.querySelector('.camera-live-dot');
 const messageBox = document.getElementById('registration-message');
+const enrollFingerCheckbox = document.getElementById('enroll-finger');
+const enrollFingerOnlyButton = document.getElementById('enroll-finger-only');
+const sensorStatusText = document.getElementById('fingerprint-sensor-status');
+const enrolledStudentsBody = document.getElementById('enrolled-students-body');
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+async function loadRegisteredStudents() {
+  if (!enrolledStudentsBody) return;
+  try {
+    const res = await fetch('/api/students', { cache: 'no-store' });
+    const data = await res.json();
+    const list = data.students || [];
+    if (!list.length) {
+      enrolledStudentsBody.innerHTML = '<tr><td colspan="5" class="empty-cell">Belum ada siswa terdaftar.</td></tr>';
+      return;
+    }
+    enrolledStudentsBody.innerHTML = list.map(row => {
+      const fingerBadge = row.finger_id != null
+        ? `<span class="pill pill-green">ID #${escapeHtml(row.finger_id)}</span>`
+        : `<span class="pill pill-neutral">Belum direkam</span>`;
+      const created = String(row.created_at || '-').replace('T', ' ');
+      return `
+      <tr data-npm="${escapeHtml(row.npm)}" data-nama="${escapeHtml(row.nama)}" style="cursor:pointer" title="Klik untuk isi NPM & Nama">
+        <td><strong>${escapeHtml(row.nama)}</strong></td>
+        <td><span class="mono">${escapeHtml(row.npm)}</span></td>
+        <td><span class="source-tag">▣ ${escapeHtml(row.photo_count)} foto</span></td>
+        <td>${fingerBadge}</td>
+        <td><span class="mono">${escapeHtml(created)}</span></td>
+      </tr>`;
+    }).join('');
+    enrolledStudentsBody.querySelectorAll('tr[data-npm]').forEach(tr => {
+      tr.addEventListener('click', () => {
+        document.getElementById('student-npm').value = tr.dataset.npm || '';
+        document.getElementById('student-name').value = tr.dataset.nama || '';
+      });
+    });
+  } catch (_err) {
+    enrolledStudentsBody.innerHTML = '<tr><td colspan="5" class="empty-cell">Gagal memuat daftar siswa.</td></tr>';
+  }
+}
+
+async function refreshSensorStatus() {
+  if (!sensorStatusText) return;
+  try {
+    const res = await fetch('/api/fingerprint/status');
+    const data = await res.json();
+    const s = data.sensor || {};
+    if (s.connected) {
+      sensorStatusText.textContent = `Terhubung di ${s.port} · Siap merekam (ID berikutnya: #${data.next_finger_id ?? '-'})`;
+      sensorStatusText.style.color = '#137a5a';
+    } else {
+      sensorStatusText.textContent = `ESP32/R503 belum terdeteksi di USB (${s.error || 'belum dicolok'}). Anda tetap bisa menyimpan foto wajah dulu.`;
+      sensorStatusText.style.color = '#818da5';
+      if (enrollFingerCheckbox) enrollFingerCheckbox.checked = false;
+    }
+  } catch (_err) {
+    sensorStatusText.textContent = 'Tidak dapat memeriksa status sensor R503.';
+  }
+}
 
 const REQUIRED_PHOTOS = 3;
 let stream = null;
@@ -153,7 +217,7 @@ form.addEventListener('submit', async (event) => {
   const npm = document.getElementById('student-npm').value.trim();
   const nama = document.getElementById('student-name').value.trim();
   const consent = document.getElementById('student-consent').checked;
-
+  const enrollFinger = enrollFingerCheckbox ? enrollFingerCheckbox.checked : false;
   if (!npm || !nama) {
     showMessage('NPM dan nama lengkap wajib diisi.', 'error');
     return;
@@ -171,13 +235,18 @@ form.addEventListener('submit', async (event) => {
   saveButton.textContent = 'Memvalidasi dan menyimpan...';
   startButton.disabled = true;
   updateControls();
-  showMessage('Sedang memvalidasi tiga foto dengan YOLO. Proses pertama mungkin lebih lama karena model dimuat.', 'info');
+  showMessage(
+    enrollFinger
+      ? 'Memvalidasi 3 foto dengan YOLO, lalu tempelkan jari 2 kali di sensor R503 saat lampu biru menyala...'
+      : 'Sedang memvalidasi tiga foto dengan YOLO. Proses pertama mungkin lebih lama karena model dimuat.',
+    'info'
+  );
 
   try {
     const response = await fetch('/api/students/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ npm, nama, photos, consent })
+      body: JSON.stringify({ npm, nama, photos, consent, enroll_finger: enrollFinger })
     });
 
     const data = await response.json().catch(() => ({}));
@@ -190,6 +259,7 @@ form.addEventListener('submit', async (event) => {
     clearPhotos();
     showMessage(`${data.message} Siswa ${data.student.nama} (${data.student.npm}) berhasil disimpan dengan ${data.student.photo_count} foto.`, 'success');
     stopCamera();
+    loadRegisteredStudents();
   } catch (error) {
     showMessage(error.message || 'Terjadi kesalahan saat mendaftarkan siswa.', 'error');
   } finally {
@@ -204,5 +274,45 @@ startButton.addEventListener('click', startCamera);
 captureButton.addEventListener('click', capturePhoto);
 retakeButton.addEventListener('click', clearPhotos);
 window.addEventListener('beforeunload', stopCamera);
+if (enrollFingerOnlyButton) {
+  enrollFingerOnlyButton.addEventListener('click', async () => {
+    clearMessage();
+    const npm = document.getElementById('student-npm').value.trim();
+    const nama = document.getElementById('student-name').value.trim();
+    if (!npm || !nama) {
+      showMessage('Isi NPM dan Nama Lengkap terlebih dahulu untuk merekam sidik jari.', 'error');
+      return;
+    }
+    enrollFingerOnlyButton.disabled = true;
+    showMessage('Tempelkan jari pada sensor R503 (2 kali tempel saat lampu biru menyala)...', 'info');
+    const rekam = (replace) => fetch('/api/fingerprint/enroll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ npm, nama, replace })
+    });
+    try {
+      let res = await rekam(false);
+      let data = await res.json().catch(() => ({}));
+      if (res.status === 409 && data.replaceable &&
+          confirm(`${data.message}\n\nRekam ulang sidik jari sekarang? Template lama akan ditimpa.`)) {
+        showMessage('Tempelkan jari pada sensor R503 (2 kali tempel)...', 'info');
+        res = await rekam(true);
+        data = await res.json().catch(() => ({}));
+      }
+      if (!res.ok) throw new Error(data.message || `Gagal merekam sidik jari (HTTP ${res.status}).`);
+      showMessage(`${data.message} (${data.student.nama} - ID Sidik Jari #${data.student.finger_id}).`, 'success');
+      refreshSensorStatus();
+      loadRegisteredStudents();
+    } catch (err) {
+      showMessage(err.message || 'Gagal merekam sidik jari R503.', 'error');
+    } finally {
+      enrollFingerOnlyButton.disabled = false;
+    }
+  });
+}
+
+refreshSensorStatus();
+setInterval(refreshSensorStatus, 4000);
+loadRegisteredStudents();
 
 renderPhotos();

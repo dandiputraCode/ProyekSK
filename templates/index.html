@@ -18,6 +18,7 @@
       <div class="nav-label">MENU UTAMA</div>
       <a class="nav-item active" href="/"><span class="nav-icon">▦</span> Dashboard</a>
       <a class="nav-item" href="/students/register"><span class="nav-icon">＋</span> Pendaftaran Siswa</a>
+      <a class="nav-item" href="#students-section"><span class="nav-icon">♙</span> Siswa Terdaftar</a>
       <a class="nav-item" href="#attendance-section"><span class="nav-icon">▤</span> Data Absensi</a>
       <a class="nav-item" href="#system-section"><span class="nav-icon">⌘</span> Status Sistem</a>
 
@@ -103,12 +104,26 @@
         <div class="table-footer"><span id="record-count">Menyiapkan data...</span><span class="refresh-note"><span class="live-dot"></span> Pembaruan otomatis setiap 1 detik</span></div>
       </section>
 
+      <section class="content-card" id="students-section" style="margin-top:20px">
+        <div class="section-heading">
+          <div><div class="eyebrow">STUDENT DIRECTORY</div><h2>Siswa Terdaftar</h2><p>Daftar siswa yang baru didaftarkan (foto wajah &amp; status sidik jari R503).</p></div>
+          <a class="button button-primary" href="/students/register">＋ <span>Tambah Siswa</span></a>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>SISWA</th><th>NPM</th><th>FOTO WAJAH</th><th>SIDIK JARI R503</th><th>TERDAFTAR</th></tr></thead>
+            <tbody id="students-body"><tr><td colspan="5" class="loading-cell">Memuat daftar siswa...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-footer"><span id="student-count">Menyiapkan data...</span><span class="refresh-note"><span class="live-dot"></span> Urutan terbaru di atas</span></div>
+      </section>
+
       <section class="bottom-grid" id="system-section">
         <article class="content-card system-card">
           <div class="section-heading compact"><div><div class="eyebrow">DEVICE OVERVIEW</div><h2>Komponen Sistem</h2></div><span class="pill pill-neutral">Prototype</span></div>
           <div class="component-row"><div class="component-icon icon-blue">▣</div><div class="component-copy"><strong>YOLO + Face Recognition</strong><small>Deteksi dan identifikasi wajah di laptop</small></div><span class="pill pill-green">Aktif saat program berjalan</span></div>
           <div class="component-row"><div class="component-icon icon-purple">⌘</div><div class="component-copy"><strong>ESP32 Web Server</strong><small>Komunikasi perangkat melalui Wi-Fi</small></div><span class="pill pill-blue">Teruji</span></div>
-          <div class="component-row"><div class="component-icon icon-orange">◉</div><div class="component-copy"><strong>Fingerprint & Load Cell</strong><small>Sensor lanjutan untuk integrasi berikutnya</small></div><span class="pill pill-neutral">Belum terpasang</span></div>
+          <div class="component-row"><div class="component-icon icon-orange">◉</div><div class="component-copy"><strong>Fingerprint R503 (USB Serial)</strong><small>Verifikasi 2 faktor bersama pengenalan wajah</small></div><span class="pill pill-green">Terintegrasi</span></div>
         </article>
         <article class="content-card note-card">
           <div class="section-heading compact"><div><div class="eyebrow">SYSTEM NOTE</div><h2>Catatan Prototype</h2></div><span class="note-mark">i</span></div>

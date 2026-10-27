@@ -7,10 +7,13 @@ import io
 import re
 import shutil
 import sqlite3
+import socket
+import sys
 
 import cv2
 import numpy as np
 from flask import Flask, jsonify, render_template, request, Response
+from esp32_serial import bridge
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "attendance.db"
@@ -24,12 +27,14 @@ app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024
 _FACE_DETECTOR = None
 
 
+# Membuka koneksi SQLite ke file attendance.db dengan hasil baris berbentuk dictionary (sqlite3.Row).
 def get_db():
     connection = sqlite3.connect(DB_PATH, timeout=15)
     connection.row_factory = sqlite3.Row
     return connection
 
 
+# Membuat tabel attendance di SQLite jika belum ada (unik per kombinasi npm dan tanggal).
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_db() as connection:
@@ -47,22 +52,74 @@ def init_db():
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS students (
+                npm TEXT PRIMARY KEY,
+                nama TEXT NOT NULL,
+                finger_id INTEGER UNIQUE,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         connection.commit()
 
 
-def count_registered_students():
-    if not FACE_DB_PATH.exists():
-        return 0
+
+init_db()
+
+# Mengambil daftar seluruh siswa terdaftar (gabungan folder database_wajah/ dan tabel students di SQLite).
+def list_registered_students():
     image_extensions = {".jpg", ".jpeg", ".png", ".webp"}
-    total = 0
-    for folder in FACE_DB_PATH.iterdir():
-        if not folder.is_dir() or "_" not in folder.name:
-            continue
-        if any(p.is_file() and p.suffix.lower() in image_extensions for p in folder.iterdir()):
-            total += 1
-    return total
+    with get_db() as connection:
+        db_rows = {
+            row["npm"]: dict(row)
+            for row in connection.execute(
+                "SELECT npm, nama, finger_id, created_at FROM students"
+            ).fetchall()
+        }
+
+    items = {}
+    if FACE_DB_PATH.exists():
+        for folder in FACE_DB_PATH.iterdir():
+            if not folder.is_dir() or "_" not in folder.name:
+                continue
+            photos = [
+                p for p in folder.iterdir()
+                if p.is_file() and p.suffix.lower() in image_extensions
+            ]
+            if not photos:
+                continue
+            npm, raw_name = folder.name.split("_", 1)
+            db_info = db_rows.get(npm, {})
+            mtime = datetime.fromtimestamp(folder.stat().st_mtime).isoformat(timespec="seconds")
+            items[npm] = {
+                "npm": npm,
+                "nama": db_info.get("nama") or raw_name.replace("_", " "),
+                "photo_count": len(photos),
+                "finger_id": db_info.get("finger_id"),
+                "created_at": db_info.get("created_at") or mtime,
+            }
+
+    for npm, db_info in db_rows.items():
+        if npm not in items:
+            items[npm] = {
+                "npm": npm,
+                "nama": db_info["nama"],
+                "photo_count": 0,
+                "finger_id": db_info["finger_id"],
+                "created_at": db_info["created_at"],
+            }
+
+    return sorted(items.values(), key=lambda item: item["created_at"] or "", reverse=True)
 
 
+# Menghitung jumlah siswa terdaftar.
+def count_registered_students():
+    return len(list_registered_students())
+
+
+# Memeriksa apakah folder dengan awalan "{npm}_" sudah ada di database_wajah/ untuk mencegah duplikasi.
 def npm_already_registered(npm):
     if not FACE_DB_PATH.exists():
         return False
@@ -73,6 +130,43 @@ def npm_already_registered(npm):
     )
 
 
+# Menentukan ID sidik jari berikutnya yang masih kosong (rentang sensor R503: 1-200).
+def next_finger_id():
+    with get_db() as connection:
+        rows = connection.execute("SELECT finger_id FROM students WHERE finger_id IS NOT NULL").fetchall()
+    terpakai = {row["finger_id"] for row in rows}
+    for kandidat in range(1, 201):
+        if kandidat not in terpakai:
+            return kandidat
+    return None
+
+
+# Mengambil data siswa (termasuk finger_id) berdasarkan NPM.
+def get_student(npm):
+    with get_db() as connection:
+        return connection.execute(
+            "SELECT npm, nama, finger_id FROM students WHERE npm = ?",
+            (npm,),
+        ).fetchone()
+
+
+# Menyimpan/memperbarui data siswa. finger_id=None berarti data sidik jari tidak diubah.
+def simpan_siswa(npm, nama, finger_id=None, ubah_finger=False):
+    with get_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO students (npm, nama, finger_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(npm) DO UPDATE SET
+                nama = excluded.nama,
+                finger_id = CASE WHEN ? THEN excluded.finger_id ELSE students.finger_id END
+            """,
+            (npm, nama, finger_id, datetime.now().isoformat(timespec="seconds"), 1 if ubah_finger else 0),
+        )
+        connection.commit()
+
+
+# Memuat model YOLO (models/yolo26n-face.pt) secara lazy-load (hanya sekali saat dibutuhkan pertama kali).
 def get_face_detector():
     global _FACE_DETECTOR
     if _FACE_DETECTOR is not None:
@@ -88,6 +182,7 @@ def get_face_detector():
     return _FACE_DETECTOR
 
 
+# Mengubah string gambar Base64 dari webcam browser menjadi array OpenCV, lalu memvalidasi tepat 1 wajah via YOLO.
 def decode_and_validate_photo(data_url, index, detector):
     if not isinstance(data_url, str) or "," not in data_url:
         raise ValueError(f"Foto {index}: format gambar tidak valid.")
@@ -134,25 +229,93 @@ def decode_and_validate_photo(data_url, index, detector):
     return image
 
 
+# Menampilkan halaman utama dashboard monitoring absensi (templates/index.html).
 @app.route("/")
 def dashboard():
     return render_template("index.html")
 
 
+# Menampilkan halaman formulir pendaftaran wajah siswa (templates/enroll.html).
 @app.get("/students/register")
 def student_registration_page():
     return render_template("enroll.html")
 
 
+# Status koneksi ESP32/R503 supaya halaman pendaftaran bisa menampilkan sensor siap atau tidak.
+@app.get("/api/fingerprint/status")
+def fingerprint_status():
+    return jsonify({
+        "status": "ok",
+        "sensor": bridge.status(),
+        "next_finger_id": next_finger_id(),
+    })
+
+
+# Daftar siswa terdaftar beserta jumlah foto wajah dan ID sidik jari R503 (terbaru di urutan pertama).
+@app.get("/api/students")
+def students_list():
+    students = list_registered_students()
+    return jsonify({
+        "status": "ok",
+        "total": len(students),
+        "students": students,
+    })
+
+
+# Merekam sidik jari untuk siswa yang sudah punya foto wajah (dipanggil dari halaman pendaftaran).
+@app.post("/api/fingerprint/enroll")
+def enroll_fingerprint():
+    payload = request.get_json(silent=True) or {}
+    npm = str(payload.get("npm", "")).strip()
+    nama = str(payload.get("nama", "")).strip()
+
+    if not re.fullmatch(r"[A-Za-z0-9.-]{1,40}", npm):
+        return jsonify({"status": "error", "message": "NPM wajib diisi sebelum merekam sidik jari."}), 400
+
+    siswa = get_student(npm)
+    if not nama and siswa:
+        nama = siswa["nama"]
+    if len(nama) < 2 or len(nama) > 150:
+        return jsonify({"status": "error", "message": "Nama siswa wajib diketahui sebelum merekam sidik jari."}), 400
+    if not bridge.status()["connected"]:
+        return jsonify({"status": "error", "message": "ESP32/R503 belum terhubung ke port USB."}), 503
+
+    # Sidik jari lama boleh ditimpa bila admin meminta rekam ulang (payload replace=true).
+    if siswa and siswa["finger_id"] is not None:
+        if payload.get("replace") is not True:
+            return jsonify({
+                "status": "error",
+                "message": f"Sidik jari NPM {npm} sudah terdaftar (ID #{siswa['finger_id']}). Kirim replace=true untuk merekam ulang.",
+                "replaceable": True,
+            }), 409
+        finger_id = siswa["finger_id"]
+    else:
+        finger_id = next_finger_id()
+        if finger_id is None:
+            return jsonify({"status": "error", "message": "Kapasitas 200 sidik jari di sensor sudah penuh."}), 409
+
+    ok, pesan = bridge.enroll(finger_id)
+    if not ok:
+        return jsonify({"status": "error", "message": pesan}), 400
+
+    simpan_siswa(npm, nama, finger_id, ubah_finger=True)
+    return jsonify({
+        "status": "fingerprint_registered",
+        "message": pesan,
+        "student": {"npm": npm, "nama": nama, "finger_id": finger_id},
+    }), 201
+
+
 @app.post("/api/students/register")
 def register_student():
-    """Local prototype endpoint for controlled webcam enrollment."""
+    """Endpoint pendaftaran siswa: validasi input, cek 3 foto dengan YOLO, lalu simpan ke database_wajah/."""
     payload = request.get_json(silent=True) or {}
 
     npm = str(payload.get("npm", "")).strip()
     nama = str(payload.get("nama", "")).strip()
     photos = payload.get("photos")
     consent = payload.get("consent") is True
+    enroll_finger = payload.get("enroll_finger") is True
 
     if not re.fullmatch(r"[A-Za-z0-9.-]{1,40}", npm):
         return jsonify({"status": "error", "message": "NPM wajib diisi dan hanya boleh berisi huruf, angka, titik, atau tanda hubung."}), 400
@@ -205,17 +368,50 @@ def register_student():
         app.logger.exception("Gagal menyimpan pendaftaran siswa")
         return jsonify({"status": "error", "message": f"Gagal menyimpan data siswa: {error}"}), 500
 
+    if enroll_finger:
+        if not bridge.status()["connected"]:
+            shutil.rmtree(student_folder, ignore_errors=True)
+            return jsonify({"status": "error", "message": "Sidik jari diminta, tetapi ESP32/R503 belum terhubung ke port USB."}), 503
+
+        finger_id = next_finger_id()
+        if finger_id is None:
+            shutil.rmtree(student_folder, ignore_errors=True)
+            return jsonify({"status": "error", "message": "Kapasitas 200 sidik jari di sensor sudah penuh."}), 409
+
+        ok, pesan = bridge.enroll(finger_id)
+        if not ok:
+            shutil.rmtree(student_folder, ignore_errors=True)
+            return jsonify({"status": "error", "message": f"Pendaftaran dibatalkan: {pesan}"}), 400
+    else:
+        finger_id = None
+
+    try:
+        simpan_siswa(npm, nama, finger_id, ubah_finger=enroll_finger)
+        tersimpan = get_student(npm)
+        finger_id = tersimpan["finger_id"] if tersimpan else finger_id
+    except Exception as error:
+        shutil.rmtree(student_folder, ignore_errors=True)
+        app.logger.exception("Gagal menyimpan data siswa")
+        return jsonify({"status": "error", "message": f"Gagal menyimpan data siswa: {error}"}), 500
+
+    catatan_sidik = (
+        f" Sidik jari tersimpan dengan ID {finger_id}."
+        if finger_id is not None
+        else " Sidik jari belum direkam; daftarkan lewat tombol di halaman pendaftaran sebelum absensi 2 faktor."
+    )
     return jsonify({
         "status": "registered",
-        "message": "Siswa berhasil didaftarkan. Hentikan lalu jalankan ulang program Face Recognition agar foto baru dimuat.",
+        "message": "Siswa berhasil didaftarkan." + catatan_sidik + " Jalankan ulang program Face Recognition agar foto baru dimuat.",
         "student": {
             "npm": npm,
             "nama": nama,
             "photo_count": len(validated_images),
+            "finger_id": finger_id,
         },
     }), 201
 
 
+# Mengambil statistik ringkasan dan daftar hingga 200 log kehadiran pada tanggal terpilih dalam format JSON.
 @app.get("/api/dashboard")
 def dashboard_data():
     selected_date = request.args.get("date", date.today().isoformat())
@@ -233,7 +429,8 @@ def dashboard_data():
             "SELECT COUNT(*) AS total FROM attendance"
         ).fetchone()["total"]
 
-    registered = count_registered_students()
+    students = list_registered_students()
+    registered = len(students)
     present_count = len({row["npm"] for row in today_rows})
     percentage = round((present_count / registered) * 100) if registered else 0
 
@@ -244,10 +441,12 @@ def dashboard_data():
         "total_records": total_records,
         "attendance_percentage": min(percentage, 100),
         "records": [dict(row) for row in today_rows[:200]],
+        "students": students,
         "server_time": datetime.now().strftime("%d %b %Y, %H:%M:%S"),
     })
 
 
+# Mencatat kehadiran siswa dari script Face Recognition ke SQLite (maksimal 1 kali per NPM per hari).
 @app.post("/api/attendance")
 def add_attendance():
     payload = request.get_json(silent=True) or {}
@@ -261,7 +460,44 @@ def add_attendance():
         return jsonify({"status": "error", "message": "Panjang data melebihi batas"}), 400
 
     tanggal = date.today().isoformat()
+
+    with get_db() as connection:
+        row = connection.execute(
+            "SELECT id, npm, nama, tanggal, waktu, status, sumber FROM attendance WHERE npm = ? AND tanggal = ?",
+            (npm, tanggal),
+        ).fetchone()
+
+    if row is not None:
+        return jsonify({
+            "status": "already_recorded",
+            "message": "Siswa sudah tercatat hadir hari ini",
+            "record": dict(row),
+        }), 200
+
+    # Faktor kedua: sidik jari siswa harus cocok di sensor R503 sebelum absensi disimpan.
+    siswa = get_student(npm)
+    finger_id = siswa["finger_id"] if siswa else None
+    if finger_id is None:
+        return jsonify({
+            "status": "error",
+            "message": "Sidik jari siswa belum terdaftar. Daftarkan lewat menu Pendaftaran Siswa.",
+        }), 409
+    if not bridge.status()["connected"]:
+        return jsonify({
+            "status": "error",
+            "message": "ESP32/R503 belum terhubung ke port USB. Absensi 2 faktor tidak bisa diverifikasi.",
+        }), 503
+
+    confidence, alasan = bridge.tunggu_match(finger_id, timeout=30)
+    if confidence is None:
+        return jsonify({
+            "status": "error",
+            "message": f"Absensi 2 faktor tidak dicatat. {alasan}",
+        }), 401
+
+    bridge.kedip_hijau()
     waktu = datetime.now().strftime("%H:%M:%S")
+    sumber = f"{sumber} + Sidik Jari"
 
     with get_db() as connection:
         cursor = connection.execute(
@@ -290,6 +526,7 @@ def add_attendance():
     }), 200
 
 
+# Mengekspor data kehadiran pada tanggal tertentu menjadi file unduhan CSV (UTF-8 dengan BOM untuk Excel).
 @app.get("/api/export")
 def export_csv():
     selected_date = request.args.get("date", date.today().isoformat())
@@ -318,17 +555,31 @@ def export_csv():
     )
 
 
+# Endpoint pengecekan status server Flask (health check).
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "service": "AIoT Smart Attendance Dashboard"})
 
 
+# Menangani error HTTP 413 jika ukuran payload foto yang diunggah melebihi batas MAX_CONTENT_LENGTH (15 MB).
 @app.errorhandler(413)
 def request_too_large(_error):
     return jsonify({"status": "error", "message": "Total ukuran foto terlalu besar. Ambil ulang foto dengan kamera standar."}), 413
 
 
+def port_5000_dipakai():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", 5000)) == 0
+
+
 if __name__ == "__main__":
+    if port_5000_dipakai():
+        print("Server Flask sudah berjalan di http://127.0.0.1:5000.")
+        print("Hentikan instance itu dulu (Ctrl+C di terminalnya) sebelum menjalankan yang baru,")
+        print("karena hanya SATU program yang boleh memegang port COM5 sensor R503.")
+        sys.exit(1)
+
     init_db()
     print("\nAIoT Smart Attendance Dashboard")
     print("Dashboard: http://127.0.0.1:5000")

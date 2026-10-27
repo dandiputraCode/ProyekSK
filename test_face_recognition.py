@@ -19,11 +19,9 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "models" / "yolo26n-face.pt"
 DATABASE_PATH = BASE_DIR / "database_wajah"
 
-# Ganti jika alamat IP ESP32 berubah
+# Alamat Flask lokal yang memegang port USB ESP32/R503.
 DASHBOARD_API_URL = "http://127.0.0.1:5000/api/attendance"
 
-ESP32_IP = "10.251.114.225"
-ESP32_URL = f"http://{ESP32_IP}"
 
 YOLO_CONFIDENCE = 0.35
 YOLO_IMAGE_SIZE = 320
@@ -33,6 +31,10 @@ FACE_THRESHOLD = 0.45
 
 # Pengenalan diulang secara berkala
 RECOGNITION_INTERVAL = 1.0
+
+# Jeda sebelum mencoba absensi lagi setelah sidik jari ditolak (naik 2x, maksimal 60 detik).
+GAGAL_JEDA_AWAL = 15
+GAGAL_JEDA_MAKS = 60
  
 # Parameter tracking kotak wajah
 TRACK_TIMEOUT = 1.5
@@ -43,9 +45,12 @@ CAMERA_HEIGHT = 480
 
 
 # ==================================================
-# 2. NORMALISASI EMBEDDING
+# 2. NORMALISASI EMBEDDING (L2 NORMALIZATION)
 # ==================================================
-
+# Fungsi: Mengubah panjang vektor embedding menjadi tepat 1.0.
+# Alasan: Cosine similarity antara dua vektor ternormalisasi (A dan B)
+# disederhanakan menjadi perkalian titik sederhana (dot product: np.dot(A, B)),
+# tanpa perlu pembagian dengan ||A|| * ||B|| yang membebani komputasi CPU.
 def normalisasi(vector):
     panjang = np.linalg.norm(vector)
 
@@ -56,9 +61,10 @@ def normalisasi(vector):
 
 
 # ==================================================
-# 3. MEMBACA DATABASE FOTO
+# 3. MEMBACA DATABASE FOTO WAJAH SISWA
 # ==================================================
-
+# Fungsi: Memindai folder 'database_wajah/', membaca foto setiap siswa (NPM_Nama),
+# mengekstrak fitur 512-d via InsightFace ArcFace, lalu merata-ratakan vektornya.
 def muat_database(face_app):
     database = {}
 
@@ -79,6 +85,7 @@ def muat_database(face_app):
         npm, nama = folder.name.split("_", 1)
         nama = nama.replace("_", " ")
 
+        # Menyimpan vektor embedding dari seluruh foto valid dalam satu folder siswa
         embeddings = []
 
         for foto_path in sorted(folder.iterdir()):
@@ -86,14 +93,17 @@ def muat_database(face_app):
             if foto_path.suffix.lower() not in ekstensi_valid:
                 continue
 
+            # Membaca file citra menggunakan OpenCV (format BGR)
             gambar = cv2.imread(str(foto_path))
 
             if gambar is None:
                 print("Foto gagal dibaca:", foto_path.name)
                 continue
 
+            # Ekstraksi fitur wajah via InsightFace
             wajah = face_app.get(gambar)
 
+            # Validasi ketat: foto referensi hanya boleh memuat tepat 1 wajah
             if len(wajah) != 1:
                 print(
                     "Foto dilewati, harus ada tepat satu wajah:",
@@ -101,12 +111,16 @@ def muat_database(face_app):
                 )
                 continue
 
+            # normed_embedding adalah vektor 512 dimensi yang sudah dinormalisasi L2
             embeddings.append(
                 wajah[0].normed_embedding
             )
 
+        # Jika terdapat minimal 1 foto yang valid, buat vektor representatif rata-rata
         if embeddings:
 
+            # Rata-rata vektor dari beberapa foto (depan, sudut kiri, sudut kanan)
+            # menghasilkan representasi wajah yang lebih toleran terhadap perubahan pose.
             rata_rata = np.mean(
                 np.asarray(embeddings),
                 axis=0
@@ -131,9 +145,11 @@ def muat_database(face_app):
 
 
 # ==================================================
-# 4. FACE RECOGNITION
+# 4. PENGENALAN IDENTITAS WAJAH (COSINE SIMILARITY)
 # ==================================================
-
+# Fungsi: Membandingkan 512-d vektor wajah kamera dengan seluruh database siswa.
+# Skor berupa rentang -1.0 hingga 1.0 (nilai 1.0 = identik sempurna).
+# Mengembalikan (NPM, Nama, Skor) jika skor >= FACE_THRESHOLD (0.45).
 def kenali_siswa(embedding, database):
 
     npm_terbaik = None
@@ -141,6 +157,7 @@ def kenali_siswa(embedding, database):
 
     for npm, data in database.items():
 
+        # Dot product pada dua vektor berpanjang 1.0 setara dengan Cosine Similarity
         skor = float(
             np.dot(
                 embedding,
@@ -148,6 +165,7 @@ def kenali_siswa(embedding, database):
             )
         )
 
+        # Pencarian skor kemiripan tertinggi (argmax)
         if skor > skor_terbaik:
             skor_terbaik = skor
             npm_terbaik = npm
@@ -166,9 +184,11 @@ def kenali_siswa(embedding, database):
 
 
 # ==================================================
-# 5. IOU UNTUK TRACKING WAJAH
+# 5. IOU (INTERSECTION OVER UNION) UNTUK TRACKING
 # ==================================================
-
+# Fungsi: Mengukur rasio tumpang tindih antara kotak deteksi frame saat ini
+# dengan kotak frame sebelumnya. Digunakan untuk melacak pergerakan wajah (tracking)
+# antar-frame tanpa perlu menjalankan pengenalan wajah berulang-ulang setiap frame.
 def hitung_iou(a, b):
 
     ax1, ay1, ax2, ay2 = a
@@ -203,13 +223,30 @@ def hitung_iou(a, b):
 
 
 # ==================================================
-# 6. MENGIRIM EVENT ABSENSI KE ESP32
+# 6. PENGIRIMAN DATA ABSENSI (WEBSITE + SIDIK JARI R503)
 # ==================================================
+# Alur 2 faktor: wajah dikenali -> Flask meminta sidik jari cocok di sensor R503
+# (port USB dipegang app_web.py) -> baru absensi dicatat ke SQLite.
+# Fungsi ini berjalan di thread HTTP sehingga video kamera tidak membeku.
+def jeda_ulang(jumlah_gagal):
+    """Backoff eksponensial: 15s, 30s, 60s, 60s, ..."""
+    if jumlah_gagal <= 0:
+        return 0
+    return min(GAGAL_JEDA_MAKS, GAGAL_JEDA_AWAL * 2 ** (jumlah_gagal - 1))
+def boleh_kirim(npm, sekarang, percobaan_terakhir, gagal_berturut):
+    """True bila NPM ini boleh dicoba absensi lagi (jeda backoff sudah lewat)."""
+    return (
+        sekarang - percobaan_terakhir.get(npm, 0.0)
+        >= jeda_ulang(gagal_berturut.get(npm, 0))
+    )
 
 
 
-def kirim_ke_esp32(npm, nama):
-    # 1. Catat ke database website
+def kirim_absensi(npm, nama, percobaan=1):
+
+    print(f"\nWAJAH DIKENALI: {nama} ({npm}) - percobaan absensi ke-{percobaan}")
+    print("Tempelkan jari pada sensor R503 (maksimal 30 detik)...")
+
     web_response = requests.post(
         DASHBOARD_API_URL,
         json={
@@ -217,56 +254,40 @@ def kirim_ke_esp32(npm, nama):
             "nama": nama,
             "source": "Face Recognition"
         },
-        timeout=3
+        timeout=35
     )
 
-    web_response.raise_for_status()
-    data_web = web_response.json()
+    data_web = web_response.json() if web_response.content else {}
+
+    if not web_response.ok:
+        raise RuntimeError(
+            data_web.get("message")
+            or f"Absensi 2 faktor ditolak (HTTP {web_response.status_code})."
+        )
 
     print("\n===== ABSENSI WEBSITE =====")
     print("Nama:", nama)
     print("NPM:", npm)
     print("Status:", data_web.get("message", "Berhasil"))
-    
-    # 2. Kirim event ke ESP32
-    # Absensi website tetap dianggap berhasil
-    # meskipun ESP32 sedang tidak tersedia.
-    try:
-        esp_response = requests.get(
-            f"{ESP32_URL}/test",
-            params={
-                "event": "FACE_OK",
-                "npm": npm,
-                "nama": nama
-            },
-            timeout=3
-        )
-
-        esp_response.raise_for_status()
-        pesan_esp32 = esp_response.text
-
-        print("ESP32:", pesan_esp32)
-
-    except requests.exceptions.RequestException as error:
-        pesan_esp32 = "ESP32 tidak dapat dihubungi"
-        print(pesan_esp32, error)
+    if data_web.get("finger_confidence") is not None:
+        print("Confidence sidik jari:", data_web["finger_confidence"])
 
     return {
         "npm": npm,
         "nama": nama,
-        "response": (
-            f"Website: {data_web.get('message', 'Berhasil')} | "
-            f"ESP32: {pesan_esp32}"
-        )
+        "response": data_web.get("message", "Berhasil"),
     }
 
 
 
 
 # ==================================================
-# 7. PEMROSES WAJAH
+# 7. KELAS PEMROSES WAJAH (FACE PROCESSOR)
 # ==================================================
-
+# Kelas ini memadukan 3 tahapan penglihatan komputer:
+# 1. Deteksi cepat lokasi wajah menggunakan Ultralytics YOLO (setiap frame yang diproses).
+# 2. Asosiasi kotak wajah lama dan baru menggunakan algoritma IoU Tracking.
+# 3. Crop area wajah + pengenalan biometrik via InsightFace ArcFace (secara berkala).
 class FaceProcessor:
 
     def __init__(self, yolo, face_app, database):
@@ -279,6 +300,8 @@ class FaceProcessor:
 
         tinggi_frame, lebar_frame = frame.shape[:2]
 
+        # Tahap 1: Inferensi YOLO pada CPU dengan resolusi input diperkecil (320x320)
+        # agar inferensi berlangsung ringan (< 30-50 ms).
         hasil = self.yolo.predict(
             source=frame,
             conf=YOLO_CONFIDENCE,
@@ -306,6 +329,7 @@ class FaceProcessor:
         tracks_baru = []
         tracks_terpakai = set()
 
+        # Tahap 2: Cocokkan setiap kotak hasil deteksi YOLO dengan jejak wajah sebelumnya (IoU Tracking)
         for bbox in detections:
 
             best_track = None
@@ -318,6 +342,7 @@ class FaceProcessor:
                 if idx in tracks_terpakai:
                     continue
 
+                # Hitung nilai tumpang-tindih (IoU) dengan kotak di frame sebelumnya
                 skor_iou = hitung_iou(
                     bbox,
                     old_track["bbox"]
@@ -327,6 +352,7 @@ class FaceProcessor:
                     best_iou = skor_iou
                     best_track = idx
 
+            # Jika tumpang tindih memadai (IoU >= 0.20), pertahankan identitas yang sudah dikenali
             if (
                 best_track is not None
                 and best_iou >= IOU_THRESHOLD
@@ -346,6 +372,7 @@ class FaceProcessor:
 
             else:
 
+                # Wajah baru yang belum pernah terdeteksi di frame sebelumnya
                 track = {
                     "bbox": bbox,
                     "label": "Mengenali...",
@@ -354,7 +381,8 @@ class FaceProcessor:
                     "verified_now": False
                 }
 
-            # Pengenalan hanya pada frame terpilih
+            # Tahap 3: Pengenalan identitas wajah hanya dijalankan pada interval waktu tertentu (1 detik)
+            # untuk menghemat sumber daya CPU laptop.
             if recognize_now:
 
                 x1, y1, x2, y2 = bbox
@@ -362,6 +390,8 @@ class FaceProcessor:
                 lebar = x2 - x1
                 tinggi = y2 - y1
 
+                # Tambahkan bantalan margin (padding) 25% horizontal dan 35% vertikal
+                # agar dahi, rahang, dan telinga ikut terbaca oleh InsightFace.
                 pad_x = int(lebar * 0.25)
                 pad_y = int(tinggi * 0.35)
 
@@ -373,10 +403,12 @@ class FaceProcessor:
                 crop = frame[cy1:cy2, cx1:cx2]
 
                 if crop.size > 0:
+                    # InsightFace mengekstrak landmark 5 titik dan vektor embedding 512-d
 
                     wajah_crop = self.face_app.get(crop)
 
                     if wajah_crop:
+                        # Ambil wajah dengan ukuran kotak terluas di area crop
 
                         wajah = max(
                             wajah_crop,
@@ -386,12 +418,14 @@ class FaceProcessor:
                             )
                         )
 
+                        # Cocokkan embedding wajah dengan database
                         npm, nama, skor = kenali_siswa(
                             wajah.normed_embedding,
                             self.database
                         )
 
                         if npm is not None:
+                            # Siswa terdaftar: kotak hijau dan label nama
 
                             track["npm"] = npm
                             track["label"] = (
@@ -401,6 +435,7 @@ class FaceProcessor:
                             track["verified_now"] = True
 
                         else:
+                            # Siswa tidak terdaftar / skor < 0.45: kotak merah
 
                             track["npm"] = None
                             track["label"] = "Tidak dikenal"
@@ -422,9 +457,12 @@ class FaceProcessor:
 
 
 # ==================================================
-# 8. PROGRAM UTAMA
+# 8. PROGRAM UTAMA (LOOP MULTI-THREADING)
 # ==================================================
-
+# Arsitektur loop utama:
+# - Thread Utama: Membaca webcam dan merender visual 30 FPS secara mulus.
+# - Thread AI (ai_executor): Menjalankan YOLO dan ArcFace secara asinkron tanpa menahan FPS kamera.
+# - Thread HTTP (http_executor): Mengirim data ke Flask dan ESP32 di latar belakang tanpa freeze.
 def main():
 
     if not MODEL_PATH.exists():
@@ -455,10 +493,10 @@ def main():
         database
     )
 
-    # Satu worker untuk pemrosesan AI
+    # Worker terpisah: 1 thread untuk inferensi AI agar tidak memblokir loop kamera
     ai_executor = ThreadPoolExecutor(max_workers=1)
 
-    # Worker terpisah untuk komunikasi ESP32
+    # Worker terpisah: 1 thread untuk permintaan jaringan HTTP (Flask & ESP32)
     http_executor = ThreadPoolExecutor(max_workers=1)
 
     kamera = cv2.VideoCapture(0)
@@ -479,10 +517,12 @@ def main():
     ai_future = None
     tracks_terakhir = []
 
-    # Proteksi pengiriman berulang selama program berjalan
-    sudah_dikirim = set()
-    sedang_dikirim = {}
-    percobaan_terakhir = {}
+    # Proteksi anti-spam: Mencegah pengiriman data berulang kali untuk siswa yang sama
+    sudah_dikirim = set()         # Siswa yang sudah sukses dikirim selama sesi aplikasi berjalan
+    sedang_dikirim = {}           # Job HTTP yang masih aktif mengudara di background
+    percobaan_terakhir = {}       # Waktu percobaan terakhir per NPM
+    gagal_berturut = {}           # Jumlah kegagalan sidik jari berturut-turut per NPM
+    terakhir_terlihat = {}        # Waktu terakhir wajah siswa terverifikasi
 
     waktu_pengakuan_terakhir = 0.0
 
@@ -490,7 +530,7 @@ def main():
     waktu_frame_terakhir = time.perf_counter()
 
     print("\nSistem absensi AIoT aktif.")
-    print("ESP32:", ESP32_URL)
+    print("Dashboard (2 faktor):", DASHBOARD_API_URL)
     print("Tekan Q untuk keluar.")
 
     try:
@@ -525,6 +565,15 @@ def main():
                 # ----------------------------------
 
                 for track in tracks_terakhir:
+                    if track.get("npm") and track.get("verified_now"):
+                        terakhir_terlihat[track["npm"]] = sekarang
+
+                # Siswa yang wajahnya hilang > 5 detik dianggap pergi: reset jeda backoff.
+                for npm_lama in list(gagal_berturut):
+                    if sekarang - terakhir_terlihat.get(npm_lama, 0.0) > 5:
+                        gagal_berturut.pop(npm_lama, None)
+
+                for track in tracks_terakhir:
 
                     npm = track.get("npm")
 
@@ -540,20 +589,16 @@ def main():
                     if npm in sedang_dikirim:
                         continue
 
-                    percobaan_sebelumnya = (
-                        percobaan_terakhir.get(npm, 0.0)
-                    )
-
-                    # Jika gagal, tunggu sebelum mencoba lagi
-                    if sekarang - percobaan_sebelumnya < 5:
+                    if not boleh_kirim(npm, sekarang, percobaan_terakhir, gagal_berturut):
                         continue
 
                     nama = database[npm]["nama"]
 
                     job = http_executor.submit(
-                        kirim_ke_esp32,
+                        kirim_absensi,
                         npm,
-                        nama
+                        nama,
+                        gagal_berturut.get(npm, 0) + 1
                     )
 
                     sedang_dikirim[npm] = job
@@ -572,19 +617,25 @@ def main():
                     hasil_kirim = job.result()
 
                     sudah_dikirim.add(npm)
+                    gagal_berturut.pop(npm, None)
 
-                    print(
-                        "\nABSENSI DIKIRIM KE ESP32:"
-                    )
+                    print("\nABSENSI 2 FAKTOR BERHASIL:")
                     print("Nama:", hasil_kirim["nama"])
                     print("NPM:", hasil_kirim["npm"])
                     print("Respons:", hasil_kirim["response"])
 
                 except Exception as error:
 
+                    gagal_berturut[npm] = gagal_berturut.get(npm, 0) + 1
+                    percobaan_terakhir[npm] = time.monotonic()
+
                     print(
-                        f"Gagal mengirim NPM {npm}:",
+                        f"Gagal mengirim NPM {npm} (percobaan ke-{gagal_berturut[npm]}):",
                         error
+                    )
+                    print(
+                        f"Absensi NPM {npm} dijeda {jeda_ulang(gagal_berturut[npm])} detik. "
+                        "Jauhkan wajah dari kamera untuk membatalkan percobaan."
                     )
 
                 finally:
@@ -593,6 +644,7 @@ def main():
             # --------------------------------------
             # D. JADWALKAN FRAME UNTUK AI
             # --------------------------------------
+            # Jika worker AI sedang menganggur, kirim salinan frame terbaru ke background
 
             if ai_future is None:
 
@@ -636,14 +688,37 @@ def main():
                     2
                 )
 
-            # Status komunikasi ESP32
+            # Status absensi 2 faktor (wajah + sidik jari)
+            if sedang_dikirim:
+                status_absensi = "TEMPELKAN JARI DI R503: " + ", ".join(sedang_dikirim)
+                warna_status = (0, 215, 255)
+            elif gagal_berturut:
+                npm_tunggu, sisa = min(
+                    (
+                        (
+                            npm,
+                            jeda_ulang(gagal)
+                            - (sekarang - percobaan_terakhir.get(npm, 0.0))
+                        )
+                        for npm, gagal in gagal_berturut.items()
+                    ),
+                    key=lambda item: item[1],
+                )
+                status_absensi = (
+                    f"Sidik jari ditolak ({npm_tunggu}) - coba lagi {max(0.0, sisa):.0f} detik"
+                )
+                warna_status = (0, 0, 255)
+            else:
+                status_absensi = f"Absensi terverifikasi: {len(sudah_dikirim)} siswa"
+                warna_status = (255, 255, 0)
+
             cv2.putText(
                 frame,
-                f"ESP32 terkirim: {len(sudah_dikirim)} siswa",
+                status_absensi,
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
-                (255, 255, 0),
+                warna_status,
                 2
             )
 
